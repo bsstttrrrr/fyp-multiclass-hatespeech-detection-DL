@@ -1,5 +1,4 @@
 # Ran on Google Colab
-!pip install transformers
 
 import pandas as pd
 import numpy as np
