@@ -14,9 +14,10 @@ import seaborn as sns
 # nlp = spacy.load("en_core_web_sm")
 # stop_words = set(stopwords.words("english"))
 # stop_words.update({"rt", "#ff", "ff"})
-
+from tensorflow.keras import layers
 # TensorFlow / Keras
 import tensorflow as tf
+from tensorflow import keras
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
     Input, Layer, Dense, Dropout, LSTM, Conv1D, GlobalMaxPool1D, Bidirectional
@@ -126,11 +127,18 @@ def get_train_test_data(df):
 # ============== Resampling =================
 def get_resampled(X_train, y_train):
     ros = RandomOverSampler(random_state=42)
-    X_train= np.array(X_train)
-    X_train_resampled, y_train_resampled = ros.fit_resample(X_train.reshape(-1, 1), y_train)
-    
+
+    # Wrap X_train in a DataFrame so it's 2D (n,1)
+    X_train_resampled, y_train_resampled = ros.fit_resample(
+        pd.DataFrame(X_train), y_train
+    )
+
+    # Flatten back to 1D text array
+    X_train_resampled = X_train_resampled[0].values  
+
+    # Visualization
     visualize_resampled_df = pd.DataFrame({
-        "text": X_train_resampled,   # first column
+        "text": X_train_resampled,
         "class": y_train_resampled
     })
 
@@ -140,8 +148,10 @@ def get_resampled(X_train, y_train):
     plt.xlabel("Class")
     plt.ylabel("Count")
     plt.show()
+
     print(visualize_resampled_df["class"].value_counts())
-    return np.array(X_train_resampled.flatten(), dtype=str), np.array(y_train_resampled)
+    return X_train_resampled, y_train_resampled
+
 
 def get_class_weights(y_train):
     class_weights = compute_class_weight(
@@ -201,12 +211,10 @@ def get_model_tokenizer():
     conv5 = GlobalMaxPool1D()(Conv1D(64, kernel_size=5, activation="relu", padding="same")(sequence_output))
     conv7 = GlobalMaxPool1D()(Conv1D(64, kernel_size=7, activation="relu", padding="same")(sequence_output))
     cnn_out = tf.keras.layers.concatenate([conv3, conv5, conv7])  # Combine features
-
+    cnn_out = tf.keras.layers.Concatenate()([conv3, conv5, conv7])
     # ===== BiLSTM Branch =====
     lstm_out = Bidirectional(LSTM(64, return_sequences=False))(sequence_output)
-
-    # ===== Merge CNN + LSTM =====
-    merged = tf.keras.layers.concatenate([cnn_out, lstm_out])
+    merged = tf.keras.layers.Concatenate()([cnn_out, lstm_out])
 
     # ---- Dense Classifier ----
     dense_out = Dense(256, activation="relu")(merged)
