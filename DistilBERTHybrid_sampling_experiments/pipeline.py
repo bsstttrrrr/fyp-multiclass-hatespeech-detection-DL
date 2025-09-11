@@ -53,6 +53,9 @@ from sklearn.preprocessing import label_binarize
 import gc, torch
 from tensorflow.keras import backend as K
 
+# Hyperparameter tuning
+import keras_tuner as kt
+
 # def preprocess(tweets):
 #     if not isinstance(tweets, pd.Series):
 #         tweets = pd.Series(tweets)
@@ -210,7 +213,6 @@ def get_model_tokenizer():
     conv3 = GlobalMaxPool1D()(Conv1D(64, kernel_size=3, activation="relu", padding="same")(sequence_output))
     conv5 = GlobalMaxPool1D()(Conv1D(64, kernel_size=5, activation="relu", padding="same")(sequence_output))
     conv7 = GlobalMaxPool1D()(Conv1D(64, kernel_size=7, activation="relu", padding="same")(sequence_output))
-    cnn_out = tf.keras.layers.concatenate([conv3, conv5, conv7])  # Combine features
     cnn_out = tf.keras.layers.Concatenate()([conv3, conv5, conv7])
     # ===== BiLSTM Branch =====
     lstm_out = Bidirectional(LSTM(64, return_sequences=False))(sequence_output)
@@ -469,3 +471,90 @@ def collect_results(all_results):
         })
 
     return pd.DataFrame(records)
+
+# =========================
+# Hyperparameter Tuning
+
+def build_model(hp):
+    """
+    Build DistilBERT + CNN + BiLSTM model with tunable hyperparameters.
+    For keras-tuner: returns only the model.
+    """
+    input_ids = tf.keras.Input(shape=(52,), dtype=tf.int32, name="input_ids")
+    attention_mask = tf.keras.Input(shape=(52,), dtype=tf.int32, name="attention_mask")
+
+    # DistilBERT backbone
+    bert_model = TFDistilBertModel.from_pretrained("distilbert-base-uncased", from_pt=True)
+    bert_output = bert_model(input_ids, attention_mask=attention_mask).last_hidden_state
+
+    # CNN branch
+    conv_filters = hp.Choice("conv_filters", [32, 64, 128])
+    conv3 = GlobalMaxPool1D()(Conv1D(conv_filters, 3, activation="relu", padding="same")(bert_output))
+    conv5 = GlobalMaxPool1D()(Conv1D(conv_filters, 5, activation="relu", padding="same")(bert_output))
+    cnn_out = tf.keras.layers.Concatenate()([conv3, conv5])
+
+    # BiLSTM branch
+    lstm_units = hp.Choice("lstm_units", [32, 64, 128])
+    lstm_out = Bidirectional(LSTM(lstm_units, return_sequences=False))(bert_output)
+
+    merged = tf.keras.layers.Concatenate()([cnn_out, lstm_out])
+
+    # Dense layers
+    dense_units = hp.Choice("dense_units", [128, 256])
+    x = Dense(dense_units, activation="relu")(merged)
+    x = Dropout(hp.Float("dropout_rate", 0.2, 0.5, step=0.1))(x)
+
+    output = Dense(3, activation="softmax")(x)
+
+    model = Model(inputs=[input_ids, attention_mask], outputs=output)
+
+    lr = hp.Choice("learning_rate", [1e-5, 2e-5, 3e-5])
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+
+    return model
+
+def run_hyperparameter_search(X_train, y_train, X_val, y_val, max_epochs=10, batch_size=16, project_name="distilbert_cnn_lstm"):
+    """
+    Run keras-tuner hyperparameter search.
+    """
+    tuner = kt.Hyperband(
+        build_model,
+        objective="val_accuracy",
+        max_epochs=max_epochs,
+        factor=3,
+        directory="tuner_logs",
+        project_name=project_name
+    )
+
+    early_stopping = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True)
+
+    # Use your existing tokenizer
+    tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
+    train_ids, train_mask = tokenize_data(X_train, tokenizer)
+    val_ids, val_mask = tokenize_data(X_val, tokenizer)
+
+    tuner.search(
+        [train_ids, train_mask],
+        y_train,
+        validation_data=([val_ids, val_mask], y_val),
+        epochs=max_epochs,
+        batch_size=batch_size,
+        callbacks=[early_stopping]
+    )
+    return tuner, tokenizer
+
+def get_best_hyperparams_and_model(tuner):
+    """
+    Get the best hyperparameters and trained model from tuner.
+    """
+    best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+    print("\nBest hyperparameters:")
+    for hp in best_hps.values.keys():
+        print(f"- {hp}: {best_hps.get(hp)}")
+
+    best_model = tuner.get_best_models(num_models=1)[0]
+    return best_hps, best_model
