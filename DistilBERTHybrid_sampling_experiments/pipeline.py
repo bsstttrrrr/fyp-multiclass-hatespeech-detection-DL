@@ -33,7 +33,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import classification_report, confusion_matrix, cohen_kappa_score
 import keras_tuner as kt
-from imblearn.over_sampling import RandomOverSampler
+# from imblearn.over_sampling import RandomOverSampler
 # --------------------------
 # Utility: Safe AdamW import
 # --------------------------
@@ -53,8 +53,7 @@ from sklearn.preprocessing import label_binarize
 import gc, torch
 from tensorflow.keras import backend as K
 
-# Hyperparameter tuning
-import keras_tuner as kt
+
 
 # def preprocess(tweets):
 #     if not isinstance(tweets, pd.Series):
@@ -200,14 +199,11 @@ def get_model_tokenizer():
 
     # ===== Load Tokenizer =====
     tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
-
     # ===== Custom Model with Hybrid Layers =====
     input_ids = tf.keras.Input(shape=(52,), dtype=tf.int32, name="input_ids")
     attention_mask = tf.keras.Input(shape=(52,), dtype=tf.int32, name="attention_mask")
-
     # Use custom layer to get BERT outputs
     sequence_output = TFDistilBertLayer()(inputs=[input_ids, attention_mask])  # (batch, seq_len, hidden_size=768)
-
     # ---- CNN Branch ----
     # ===== CNN Branch with Multiple Kernels =====
     conv3 = GlobalMaxPool1D()(Conv1D(64, kernel_size=3, activation="relu", padding="same")(sequence_output))
@@ -217,17 +213,14 @@ def get_model_tokenizer():
     # ===== BiLSTM Branch =====
     lstm_out = Bidirectional(LSTM(64, return_sequences=False))(sequence_output)
     merged = tf.keras.layers.Concatenate()([cnn_out, lstm_out])
-
     # ---- Dense Classifier ----
     dense_out = Dense(256, activation="relu")(merged)
     dense_out = Dropout(0.3)(dense_out)
     dense_out = Dense(128, activation="relu")(dense_out)
     dense_out = Dropout(0.3)(dense_out)
     output = Dense(3, activation="softmax")(dense_out)
-
     # ===== Final Model =====
     distilBERT_CNN_BiLSTM = Model(inputs=[input_ids, attention_mask], outputs=output)
-
     # Compile
     distilBERT_CNN_BiLSTM.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=2e-5),
@@ -476,39 +469,41 @@ def collect_results(all_results):
 # Hyperparameter Tuning
 
 def build_model(hp):
-    """
-    Build DistilBERT + CNN + BiLSTM model with tunable hyperparameters.
-    For keras-tuner: returns only the model.
-    """
-    input_ids = tf.keras.Input(shape=(52,), dtype=tf.int32, name="input_ids")
-    attention_mask = tf.keras.Input(shape=(52,), dtype=tf.int32, name="attention_mask")
-
-    # DistilBERT backbone
-    bert_model = TFDistilBertModel.from_pretrained("distilbert-base-uncased", from_pt=True)
-    bert_output = bert_model(input_ids, attention_mask=attention_mask).last_hidden_state
-
-    # CNN branch
-    conv_filters = hp.Choice("conv_filters", [32, 64, 128])
-    conv3 = GlobalMaxPool1D()(Conv1D(conv_filters, 3, activation="relu", padding="same")(bert_output))
-    conv5 = GlobalMaxPool1D()(Conv1D(conv_filters, 5, activation="relu", padding="same")(bert_output))
-    cnn_out = tf.keras.layers.Concatenate()([conv3, conv5])
-
-    # BiLSTM branch
-    lstm_units = hp.Choice("lstm_units", [32, 64, 128])
-    lstm_out = Bidirectional(LSTM(lstm_units, return_sequences=False))(bert_output)
+    max_len = 52
+    # Inputs
+    input_ids = tf.keras.Input(shape=(max_len,), dtype=tf.int32, name="input_ids")
+    attention_mask = tf.keras.Input(shape=(max_len,), dtype=tf.int32, name="attention_mask")
+    print(f"Input IDs type in build_model: {type(input_ids)}")
+    print(f"Attention Mask type in build_model: {type(attention_mask)}")
+    # DistilBERT backbone (wrapped layer)
+    bert_model = TFDistilBertModel.from_pretrained("distilbert-base-uncased")
+    bert_model.trainable = False
+    sequence_output = bert_model(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+    # ---- CNN Branch (multi-kernel) ----
+    conv_filters = hp.Choice("conv_filters", [32, 64])
+    conv3 = GlobalMaxPool1D()(Conv1D(conv_filters, kernel_size=3, activation="relu", padding="same")(sequence_output))
+    conv5 = GlobalMaxPool1D()(Conv1D(conv_filters, kernel_size=5, activation="relu", padding="same")(sequence_output))
+    conv7 = GlobalMaxPool1D()(Conv1D(conv_filters, kernel_size=7, activation="relu", padding="same")(sequence_output))
+    cnn_out = tf.keras.layers.Concatenate()([conv3, conv5, conv7])
+    # ---- BiLSTM Branch ----
+    lstm_units = hp.Choice("lstm_units", [32, 64])
+    lstm_out = Bidirectional(LSTM(lstm_units, return_sequences=False))(sequence_output)
 
     merged = tf.keras.layers.Concatenate()([cnn_out, lstm_out])
 
-    # Dense layers
-    dense_units = hp.Choice("dense_units", [128, 256])
+    # ---- Dense Layers ----
+    dense_units = hp.Choice("dense_units", [64, 128, 256])
     x = Dense(dense_units, activation="relu")(merged)
     x = Dropout(hp.Float("dropout_rate", 0.2, 0.5, step=0.1))(x)
+    x = Dense(dense_units, activation="relu")(x)   # keep second dense fixed like your original
+    x = Dropout(0.3)(x)                    # or tune this too
 
     output = Dense(3, activation="softmax")(x)
 
     model = Model(inputs=[input_ids, attention_mask], outputs=output)
 
-    lr = hp.Choice("learning_rate", [1e-5, 2e-5, 3e-5])
+    # Optimizer with tunable LR
+    lr = hp.Choice("learning_rate", [1e-5, 2e-5])
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
         loss="sparse_categorical_crossentropy",
@@ -527,7 +522,8 @@ def run_hyperparameter_search(X_train, y_train, X_val, y_val, max_epochs=10, bat
         max_epochs=max_epochs,
         factor=3,
         directory="tuner_logs",
-        project_name=project_name
+        project_name=project_name,
+        max_consecutive_failed_trials=5
     )
 
     early_stopping = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True)
