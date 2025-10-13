@@ -97,4 +97,5 @@ and credit of ablation studies due to Dr Bashar Tahayna (UTAR).
 ### Reference
 Davidson, T., Warmsley, D., Macy, M., & Weber, I. (2017). Automated Hate Speech Detection and the Problem of Offensive Language. ICWSM. 
 
+Dataset is available at [Click to Redirect to Davidson's Repository](https://github.com/t-davidson/hate-speech-and-offensive-language)
  
